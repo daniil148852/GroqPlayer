@@ -4,7 +4,7 @@ import com.mojang.authlib.GameProfile;
 import dev.groqplayer.GroqPlayerMod;
 import dev.groqplayer.ai.GroqAIBrain;
 import net.minecraft.block.BlockState;
-import net.minecraft.command.EntityAnchorArgument;
+import net.minecraft.command.argument.EntityAnchorArgumentType;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.LivingEntity;
@@ -220,7 +220,7 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         }
 
         if (target != null) {
-            this.lookAt(EntityAnchorArgument.EntityAnchor.EYES, target.getPos());
+            this.lookAt(EntityAnchorArgumentType.EntityAnchor.EYES, target.getPos());
             this.attack(target);
             this.swingHand(Hand.MAIN_HAND);
         }
