@@ -17,6 +17,9 @@ public class GroqApiClient {
     private static final Logger LOGGER = LoggerFactory.getLogger("groqplayer-api");
     private static final String GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
     private static final Gson GSON = new GsonBuilder().create();
+    private static final int MAX_TOKENS = 512;
+    private static final int MAX_RETRIES = 1;
+
     private static final ExecutorService EXECUTOR = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "GroqPlayer-API");
         t.setDaemon(true);
@@ -38,16 +41,40 @@ public class GroqApiClient {
 
         EXECUTOR.submit(() -> {
             try {
-                String response = sendRequest(apiKey, messages);
+                String response = sendRequestWithRetry(apiKey, messages);
                 callback.accept(response);
             } catch (Exception e) {
-                LOGGER.error("[GroqPlayer] API error: {}", e.getMessage());
+                LOGGER.error("[GroqPlayer] API error after retries: {}", e.getMessage());
                 if (GroqConfig.isDebugMode()) {
                     e.printStackTrace();
                 }
                 callback.accept(null);
             }
         });
+    }
+
+    /**
+     * Sends the request with one retry on failure.
+     */
+    private static String sendRequestWithRetry(String apiKey, List<ChatMessage> messages) throws IOException {
+        IOException lastException = null;
+        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                return sendRequest(apiKey, messages);
+            } catch (IOException e) {
+                lastException = e;
+                if (attempt < MAX_RETRIES) {
+                    LOGGER.warn("[GroqPlayer] API request failed (attempt {}), retrying...: {}", attempt + 1, e.getMessage());
+                    try {
+                        Thread.sleep(1000); // Wait 1 second before retry
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw e;
+                    }
+                }
+            }
+        }
+        throw lastException;
     }
 
     private static String sendRequest(String apiKey, List<ChatMessage> messages) throws IOException {
@@ -63,7 +90,7 @@ public class GroqApiClient {
         // Build request body
         JsonObject requestBody = new JsonObject();
         requestBody.addProperty("model", GroqConfig.getModel());
-        requestBody.addProperty("max_tokens", 256);
+        requestBody.addProperty("max_tokens", MAX_TOKENS);
         requestBody.addProperty("temperature", 0.8f);
 
         JsonArray messagesArray = new JsonArray();

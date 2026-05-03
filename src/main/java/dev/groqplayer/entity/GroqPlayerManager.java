@@ -20,14 +20,6 @@ public class GroqPlayerManager {
 
     /**
      * Spawns a new AI player at the given position.
-     *
-     * The spawn process uses the server's standard onPlayerConnect flow
-     * with a FakeClientConnection that discards all outgoing packets.
-     * We wrap the connection calls in try-catch because the fake
-     * connection cannot fully emulate a real Netty channel — some
-     * internal server methods may throw NPE when writing packets.
-     * These errors are non-fatal: the player still gets added to the
-     * world and functions correctly.
      */
     public boolean spawnPlayer(MinecraftServer server, String name, String personality, Vec3d pos) {
         if (activePlayers.containsKey(name)) {
@@ -48,20 +40,12 @@ public class GroqPlayerManager {
             fakePlayer.getHungerManager().setFoodLevel(20);
 
             // Connect the fake player using the standard server flow.
-            // onPlayerConnect expects (ClientConnection, ServerPlayerEntity) and will:
-            //   1. Create a real ServerPlayNetworkHandler for the player
-            //   2. Send initial game state packets (which our FakeClientConnection discards)
-            //   3. Add the player to the player list
-            //
-            // Some internal packet sends may fail with NPE because our fake connection
-            // has no real Netty channel. We catch those errors below.
             ClientConnection fakeConnection = fakePlayer.getFakeConnection();
 
             try {
                 server.getPlayerManager().onPlayerConnect(fakeConnection, fakePlayer);
             } catch (NullPointerException e) {
                 // Expected: internal packet send tries to access null Netty channel.
-                // The player is still added to the world — just some sync packets were lost.
                 LOGGER.debug("[GroqPlayer] Ignored NPE during player connect (expected with fake connection): {}", e.getMessage());
             } catch (Exception e) {
                 // Other errors during connection — log but continue
@@ -142,15 +126,29 @@ public class GroqPlayerManager {
 
     /**
      * Called when a player sends a chat message.
+     * Always triggers AI response when the bot's name is mentioned.
      */
     public void onPlayerChat(String senderName, String message) {
         for (GroqFakePlayer aiPlayer : activePlayers.values()) {
             try {
-                aiPlayer.getAIBrain().onChatReceived(senderName, message, aiPlayer);
+                String botName = aiPlayer.getName().getString();
+                // Always respond when name is mentioned (not 30% random)
+                boolean addressed = message.toLowerCase().contains(botName.toLowerCase());
+                if (addressed) {
+                    aiPlayer.getAIBrain().onChatReceived(senderName, message, aiPlayer);
+                }
             } catch (Exception e) {
                 LOGGER.error("[GroqPlayer] Error passing chat to AI player: {}", e.getMessage());
             }
         }
+    }
+
+    /**
+     * Get a specific AI player by name.
+     * @return The GroqFakePlayer, or null if not found
+     */
+    public GroqFakePlayer getPlayer(String name) {
+        return activePlayers.get(name);
     }
 
     public Collection<GroqFakePlayer> getActivePlayers() {

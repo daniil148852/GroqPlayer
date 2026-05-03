@@ -11,7 +11,9 @@ import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.FoodComponent;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.network.ClientConnection;
 import net.minecraft.network.NetworkSide;
 import net.minecraft.network.PacketCallbacks;
@@ -27,8 +29,7 @@ import net.minecraft.world.GameMode;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 
 public class GroqFakePlayer extends ServerPlayerEntity {
 
@@ -37,13 +38,31 @@ public class GroqFakePlayer extends ServerPlayerEntity {
     private int thinkTimer = 0;
     private static final int THINK_INTERVAL = 60; // 3 seconds
 
+    // Action queue — replaces single pendingAction
+    private final LinkedList<GroqAIBrain.AIAction> actionQueue = new LinkedList<>();
+
     // Movement state
     private Vec3d moveTarget = null;
     private boolean isSprinting = false;
-    private int actionCooldown = 0;
     private int lookTimer = 0;
     private float lookYaw = 0;
     private float lookPitch = 0;
+
+    // Mining state — progress-based
+    private BlockPos miningTarget = null;
+    private float miningProgress = 0;
+    private float miningTotalRequired = 0;
+    private int miningSwingTimer = 0;
+
+    // Crafting cooldown
+    private int craftCooldown = 0;
+
+    // Attack cooldown
+    private int attackCooldown = 0;
+
+    // Walking speed constants
+    private static final double WALK_SPEED = 0.12;  // blocks per tick (~4.3 m/s)
+    private static final double SPRINT_SPEED = 0.18; // blocks per tick (~5.6 m/s)
 
     public GroqFakePlayer(MinecraftServer server, ServerWorld world, GameProfile profile, String personality) {
         super(server, world, profile);
@@ -52,9 +71,7 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         // Create fake connection that safely discards all packets
         this.fakeConnection = new FakeClientConnection();
 
-        // Create a fake network handler — note: onPlayerConnect will replace this
-        // with a real ServerPlayNetworkHandler, but our FakeClientConnection
-        // will still be used for packet sending
+        // Create a fake network handler
         this.networkHandler = new FakeNetworkHandler(server, this, fakeConnection);
 
         // Set game mode via ServerPlayerEntity method
@@ -64,20 +81,31 @@ public class GroqFakePlayer extends ServerPlayerEntity {
 
     /**
      * Returns the fake ClientConnection used by this AI player.
-     * Needed by GroqPlayerManager to call onPlayerConnect.
      */
     public FakeClientConnection getFakeConnection() {
         return fakeConnection;
     }
 
+    /**
+     * Enqueue an action to the queue.
+     */
+    public void enqueueAction(GroqAIBrain.AIAction action) {
+        actionQueue.addLast(action);
+    }
+
+    /**
+     * Enqueue multiple actions.
+     */
+    public void enqueueActions(List<GroqAIBrain.AIAction> actions) {
+        actionQueue.addAll(actions);
+    }
+
     @Override
     public void tick() {
-        // Prevent super.tick() from crashing — the real ServerPlayNetworkHandler
-        // created by onPlayerConnect may try to tick the connection
+        // Prevent super.tick() from crashing
         try {
             super.tick();
         } catch (Exception e) {
-            // Silently catch network-related errors from the handler tick
             GroqPlayerMod.LOGGER.debug("[GroqPlayer] Ignored tick error for {}: {}", this.getName().getString(), e.getMessage());
         }
 
@@ -92,10 +120,10 @@ public class GroqFakePlayer extends ServerPlayerEntity {
             brain.think(this, world);
         }
 
-        // Process pending action from AI
-        GroqAIBrain.AIAction action = brain.pollAction();
-        if (action != null) {
-            executeAction(action, world);
+        // Poll actions from brain into queue
+        GroqAIBrain.AIAction polledAction = brain.pollAction();
+        if (polledAction != null) {
+            actionQueue.addLast(polledAction);
         }
 
         // Process pending chat
@@ -107,17 +135,27 @@ public class GroqFakePlayer extends ServerPlayerEntity {
             );
         }
 
-        // Apply movement
-        if (moveTarget != null) {
-            moveToward(moveTarget);
-            if (this.getPos().squaredDistanceTo(moveTarget) < 1.0) {
-                moveTarget = null;
-                this.setSprinting(false);
+        // Process action queue — execute one action per tick from the queue
+        if (!actionQueue.isEmpty()) {
+            GroqAIBrain.AIAction action = actionQueue.pollFirst();
+            if (action != null) {
+                executeAction(action, world);
             }
         }
 
-        // Action cooldown
-        if (actionCooldown > 0) actionCooldown--;
+        // Continue movement toward target (every tick)
+        if (moveTarget != null) {
+            tickMovement(world);
+        }
+
+        // Continue mining progress (every tick)
+        if (miningTarget != null) {
+            tickMining(world);
+        }
+
+        // Cooldowns
+        if (craftCooldown > 0) craftCooldown--;
+        if (attackCooldown > 0) attackCooldown--;
 
         // Smooth look rotation
         if (lookTimer > 0) {
@@ -149,6 +187,317 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         }
     }
 
+    // ======================== MOVEMENT ========================
+
+    /**
+     * Movement using direct position updates instead of setVelocity().
+     * setVelocity() doesn't work properly for ServerPlayerEntity on the server side,
+     * so we teleport toward the target each tick by a small increment.
+     */
+    private void tickMovement(ServerWorld world) {
+        Vec3d pos = this.getPos();
+        Vec3d diff = moveTarget.subtract(pos);
+        double horizDist = diff.horizontalLength();
+
+        if (horizDist < 1.0) {
+            // Arrived at target
+            moveTarget = null;
+            this.setSprinting(false);
+            isSprinting = false;
+            return;
+        }
+
+        double speed = isSprinting ? SPRINT_SPEED : WALK_SPEED;
+        double step = Math.min(speed, horizDist);
+
+        // Calculate direction
+        double dx = (diff.x / horizDist) * step;
+        double dz = (diff.z / horizDist) * step;
+
+        double newX = pos.x + dx;
+        double newZ = pos.z + dz;
+
+        // Handle vertical: step up blocks or fall
+        double newY = pos.y;
+        BlockPos feetPos = BlockPos.ofFloored(newX, pos.y, newZ);
+        BlockState feetBlock = world.getBlockState(feetPos);
+        BlockState belowFeet = world.getBlockState(feetPos.down());
+
+        // If the target block at feet level is solid, try stepping up 1 block
+        if (!feetBlock.isAir() && feetBlock.isSolidBlock(world, feetPos)) {
+            BlockState aboveFeet = world.getBlockState(feetPos.up());
+            if (aboveFeet.isAir() || !aboveFeet.isSolidBlock(world, feetPos.up())) {
+                newY = pos.y + 1.0; // Step up
+            } else {
+                // Can't step up, block the way
+                newX = pos.x;
+                newZ = pos.z;
+            }
+        }
+
+        // Face toward target
+        float targetYaw = (float) (Math.toDegrees(Math.atan2(-diff.x, diff.z)));
+        this.setYaw(targetYaw);
+
+        // Apply gravity — if not on ground, fall
+        if (!this.isOnGround()) {
+            newY = pos.y - 0.08; // Simple gravity
+        } else if (newY <= pos.y) {
+            // Stay on ground level
+            newY = Math.max(newY, pos.y);
+        }
+
+        // Use setPos for direct position update
+        this.setPos(newX, newY, newZ);
+
+        // Jump if there's a block in front and we're on ground
+        BlockPos frontPos = BlockPos.ofFloored(pos.add(new Vec3d(dx, 0, dz).normalize().multiply(0.6)));
+        if (!world.getBlockState(frontPos).isAir() && this.isOnGround()) {
+            this.jump();
+        }
+    }
+
+    // ======================== MINING ========================
+
+    /**
+     * Start mining a block. Progress accumulates each tick.
+     * When progress >= required, the block breaks.
+     */
+    private void startMining(Vec3d targetPos, ServerWorld world) {
+        BlockPos blockPos = BlockPos.ofFloored(targetPos);
+        BlockState state = world.getBlockState(blockPos);
+
+        if (state.isAir() || state.getBlock() == net.minecraft.block.Blocks.BEDROCK) {
+            return; // Can't mine air or bedrock
+        }
+
+        // Cancel previous mining if targeting a different block
+        if (miningTarget != null && !miningTarget.equals(blockPos)) {
+            miningProgress = 0;
+        }
+
+        miningTarget = blockPos;
+        // Calculate total mining time based on block hardness and tool
+        float hardness = state.getHardness(world, blockPos);
+        miningTotalRequired = Math.max(1, hardness * 20); // Scale hardness to ticks
+        miningProgress = 0;
+
+        // Look at the block being mined
+        this.lookAt(EntityAnchorArgumentType.EntityAnchor.EYES, Vec3d.ofCenter(blockPos));
+    }
+
+    /**
+     * Tick the mining progress. Called every tick while miningTarget is set.
+     */
+    private void tickMining(ServerWorld world) {
+        if (miningTarget == null) return;
+
+        BlockState state = world.getBlockState(miningTarget);
+
+        // Block was already broken or changed
+        if (state.isAir()) {
+            miningTarget = null;
+            miningProgress = 0;
+            return;
+        }
+
+        // Increment progress — tool speed affects this
+        float speedMultiplier = getToolSpeedMultiplier(state);
+        miningProgress += speedMultiplier;
+
+        // Swing arm periodically while mining
+        miningSwingTimer++;
+        if (miningSwingTimer >= 4) {
+            this.swingHand(Hand.MAIN_HAND);
+            miningSwingTimer = 0;
+        }
+
+        // Check if mining complete
+        if (miningProgress >= miningTotalRequired) {
+            // Break the block with proper drops
+            world.breakBlock(miningTarget, true, this);
+            this.swingHand(Hand.MAIN_HAND);
+
+            // Reset mining state
+            miningTarget = null;
+            miningProgress = 0;
+            miningTotalRequired = 0;
+        }
+    }
+
+    /**
+     * Get mining speed multiplier based on equipped tool vs block type.
+     */
+    private float getToolSpeedMultiplier(BlockState state) {
+        ItemStack tool = this.getMainHandStack();
+        if (tool.isEmpty()) return 1.0f;
+
+        float speed = tool.getMiningSpeedMultiplier(state);
+        // If tool is effective against this block, use tool speed; otherwise base speed
+        if (speed > 1.0f) {
+            return speed;
+        }
+        return 1.0f;
+    }
+
+    // ======================== CRAFTING ========================
+
+    /**
+     * Simple crafting system with hardcoded recipes.
+     * Checks if player has required materials, removes them, and adds the result.
+     */
+    private void craftItem(String itemId, ServerWorld world) {
+        if (craftCooldown > 0) return;
+        craftCooldown = 40; // 2 second cooldown between crafts
+
+        CraftingRecipe recipe = CraftingRecipe.get(itemId);
+        if (recipe == null) {
+            chatMessage("I don't know how to craft " + itemId + "...");
+            return;
+        }
+
+        // Check if we have required materials
+        if (!hasIngredients(recipe)) {
+            chatMessage("I don't have the materials for " + recipe.resultName + "!");
+            return;
+        }
+
+        // Remove ingredients
+        for (Ingredient ing : recipe.ingredients) {
+            removeItems(ing.item, ing.count);
+        }
+
+        // Add result
+        ItemStack result = new ItemStack(recipe.resultItem, recipe.resultCount);
+        if (!this.getInventory().insertStack(result)) {
+            // Drop if inventory full
+            this.dropItem(result, false);
+        }
+
+        chatMessage("Crafted " + recipe.resultCount + "x " + recipe.resultName + "!");
+    }
+
+    private boolean hasIngredients(CraftingRecipe recipe) {
+        for (Ingredient ing : recipe.ingredients) {
+            if (countItem(ing.item) < ing.count) return false;
+        }
+        return true;
+    }
+
+    private int countItem(Item item) {
+        int count = 0;
+        for (int i = 0; i < this.getInventory().size(); i++) {
+            ItemStack stack = this.getInventory().getStack(i);
+            if (stack.getItem() == item) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private void removeItems(Item item, int count) {
+        int remaining = count;
+        for (int i = 0; i < this.getInventory().size() && remaining > 0; i++) {
+            ItemStack stack = this.getInventory().getStack(i);
+            if (stack.getItem() == item) {
+                int toRemove = Math.min(stack.getCount(), remaining);
+                stack.decrement(toRemove);
+                remaining -= toRemove;
+            }
+        }
+    }
+
+    private void chatMessage(String msg) {
+        this.server.getPlayerManager().broadcast(
+            Text.literal("<" + this.getName().getString() + "> " + msg),
+            false
+        );
+    }
+
+    // ======================== INVENTORY ========================
+
+    /**
+     * Equip the best available tool.
+     * Since getMiningSpeedMultiplier requires a BlockState, we use a heuristic:
+     * prioritize tool items (pickaxe > axe > shovel > sword) in the hotbar.
+     */
+    private void equipBestTool() {
+        int bestSlot = -1;
+        int bestPriority = 0;
+
+        for (int i = 0; i < 9; i++) {
+            ItemStack stack = this.getInventory().getStack(i);
+            if (stack.isEmpty()) continue;
+            int priority = getToolPriority(stack);
+            if (priority > bestPriority) {
+                bestPriority = priority;
+                bestSlot = i;
+            }
+        }
+
+        if (bestSlot >= 0) {
+            this.getInventory().selectedSlot = bestSlot;
+        }
+    }
+
+    private int getToolPriority(ItemStack stack) {
+        Item item = stack.getItem();
+        if (item == Items.NETHERITE_PICKAXE) return 9;
+        if (item == Items.DIAMOND_PICKAXE) return 8;
+        if (item == Items.IRON_PICKAXE) return 7;
+        if (item == Items.STONE_PICKAXE) return 6;
+        if (item == Items.GOLDEN_PICKAXE) return 5;
+        if (item == Items.WOODEN_PICKAXE) return 4;
+        if (item == Items.NETHERITE_AXE) return 3;
+        if (item == Items.DIAMOND_AXE) return 3;
+        if (item == Items.IRON_AXE) return 3;
+        if (item == Items.STONE_AXE) return 3;
+        if (item == Items.WOODEN_AXE) return 3;
+        if (item == Items.NETHERITE_SWORD) return 2;
+        if (item == Items.DIAMOND_SWORD) return 2;
+        if (item == Items.IRON_SWORD) return 2;
+        if (item == Items.STONE_SWORD) return 2;
+        if (item == Items.WOODEN_SWORD) return 2;
+        if (item == Items.NETHERITE_SHOVEL) return 1;
+        if (item == Items.DIAMOND_SHOVEL) return 1;
+        if (item == Items.IRON_SHOVEL) return 1;
+        if (item == Items.STONE_SHOVEL) return 1;
+        if (item == Items.WOODEN_SHOVEL) return 1;
+        return 0;
+    }
+
+    /**
+     * Equip a specific item by name to the main hand.
+     */
+    private void equipItem(String itemId) {
+        for (int i = 0; i < this.getInventory().size(); i++) {
+            ItemStack stack = this.getInventory().getStack(i);
+            if (!stack.isEmpty() && stack.getItem().toString().equals(itemId)) {
+                // Move to hotbar slot if not already
+                if (i >= 9) {
+                    int hotbarSlot = findEmptyHotbarSlot();
+                    if (hotbarSlot >= 0) {
+                        this.getInventory().setStack(hotbarSlot, stack.copy());
+                        this.getInventory().setStack(i, ItemStack.EMPTY);
+                        this.getInventory().selectedSlot = hotbarSlot;
+                    }
+                } else {
+                    this.getInventory().selectedSlot = i;
+                }
+                return;
+            }
+        }
+    }
+
+    private int findEmptyHotbarSlot() {
+        for (int i = 0; i < 9; i++) {
+            if (this.getInventory().getStack(i).isEmpty()) return i;
+        }
+        return 0; // Default to slot 0 if full
+    }
+
+    // ======================== ACTION EXECUTION ========================
+
     private void executeAction(GroqAIBrain.AIAction action, ServerWorld world) {
         switch (action.type()) {
             case "walk" -> {
@@ -167,8 +516,22 @@ public class GroqFakePlayer extends ServerPlayerEntity {
                 }
             }
             case "attack" -> attackNearestTarget(world);
-            case "mine" -> mineBlock(action.target(), world);
+            case "mine" -> {
+                equipBestTool();
+                startMining(action.target(), world);
+            }
             case "place" -> placeBlock(action.target(), world);
+            case "craft" -> {
+                if (action.item() != null) {
+                    craftItem(action.item(), world);
+                }
+            }
+            case "equip" -> {
+                if (action.item() != null) {
+                    equipItem(action.item());
+                }
+            }
+            case "eat" -> autoEat();
             case "use_item" -> {
                 this.swingHand(Hand.MAIN_HAND);
                 ItemStack held = this.getMainHandStack();
@@ -176,39 +539,27 @@ public class GroqFakePlayer extends ServerPlayerEntity {
                     this.setCurrentHand(Hand.MAIN_HAND);
                 }
             }
-            case "eat" -> autoEat();
             case "look_around" -> startLookAround();
             case "crouch" -> this.setSneaking(!this.isSneaking());
             case "follow_player" -> followNearestPlayer(world);
             case "explore" -> exploreRandom(world);
             case "collect_items" -> autoCollectItems(world);
-            default -> {} // idle - do nothing
+            case "flee" -> fleeFrom(world);
+            case "chat_only" -> {
+                // Just chat, no action — message is handled via pollChat()
+                if (action.message() != null) {
+                    chatMessage(action.message());
+                }
+            }
+            default -> {} // idle — do nothing
         }
     }
 
-    private void moveToward(Vec3d target) {
-        Vec3d pos = this.getPos();
-        Vec3d diff = target.subtract(pos);
-        double dist = diff.horizontalLength();
-
-        if (dist < 0.5) return;
-
-        float targetYaw = (float) (Math.toDegrees(Math.atan2(-diff.x, diff.z)));
-        this.setYaw(targetYaw);
-
-        double speed = isSprinting ? 0.2 : 0.15;
-        Vec3d normalized = new Vec3d(diff.x / dist, 0, diff.z / dist);
-        this.setVelocity(normalized.multiply(speed).add(0, this.getVelocity().y, 0));
-
-        BlockPos frontPos = BlockPos.ofFloored(pos.add(normalized.multiply(0.6)));
-        if (!this.getWorld().getBlockState(frontPos).isAir() && this.isOnGround()) {
-            this.jump();
-        }
-    }
+    // ======================== COMBAT ========================
 
     private void attackNearestTarget(ServerWorld world) {
-        if (actionCooldown > 0) return;
-        actionCooldown = 20;
+        if (attackCooldown > 0) return;
+        attackCooldown = 20;
 
         LivingEntity target = null;
         double nearestDist = Double.MAX_VALUE;
@@ -225,35 +576,26 @@ public class GroqFakePlayer extends ServerPlayerEntity {
 
         if (target != null) {
             this.lookAt(EntityAnchorArgumentType.EntityAnchor.EYES, target.getPos());
+            equipBestTool(); // Equip weapon
             this.attack(target);
             this.swingHand(Hand.MAIN_HAND);
         }
     }
 
-    private void mineBlock(Vec3d pos, ServerWorld world) {
-        if (actionCooldown > 0) return;
-        actionCooldown = 20;
-
-        BlockPos blockPos = BlockPos.ofFloored(pos);
-        BlockState state = world.getBlockState(blockPos);
-        if (!state.isAir() && state.getBlock() != net.minecraft.block.Blocks.BEDROCK) {
-            world.breakBlock(blockPos, true, this);
-            this.swingHand(Hand.MAIN_HAND);
-        }
-    }
+    // ======================== PLACING ========================
 
     private void placeBlock(Vec3d pos, ServerWorld world) {
-        if (actionCooldown > 0) return;
-        actionCooldown = 10;
-
         ItemStack held = this.getMainHandStack();
         if (held.isEmpty()) return;
 
         BlockPos targetPos = BlockPos.ofFloored(pos);
         if (!world.getBlockState(targetPos).isAir()) return;
 
+        // Try to place using the item's use logic
         this.swingHand(Hand.MAIN_HAND);
     }
+
+    // ======================== AUTO SYSTEMS ========================
 
     private void autoCollectItems(ServerWorld world) {
         List<ItemEntity> items = world.getEntitiesByClass(ItemEntity.class,
@@ -266,14 +608,22 @@ public class GroqFakePlayer extends ServerPlayerEntity {
     }
 
     private void autoEat() {
-        if (this.getHungerManager().getFoodLevel() > 16) return;
+        if (this.getHungerManager().getFoodLevel() > 14) return;
 
         for (int i = 0; i < this.getInventory().size(); i++) {
             ItemStack stack = this.getInventory().getStack(i);
             if (!stack.isEmpty() && stack.isFood()) {
                 FoodComponent food = stack.getItem().getFoodComponent();
                 if (food != null) {
-                    this.getInventory().selectedSlot = i < 9 ? i : this.getInventory().selectedSlot;
+                    if (i < 9) {
+                        this.getInventory().selectedSlot = i;
+                    } else {
+                        // Move to hotbar
+                        int hotbarSlot = findEmptyHotbarSlot();
+                        this.getInventory().setStack(hotbarSlot, stack.copy());
+                        this.getInventory().setStack(i, ItemStack.EMPTY);
+                        this.getInventory().selectedSlot = hotbarSlot;
+                    }
                     this.setCurrentHand(Hand.MAIN_HAND);
                     break;
                 }
@@ -303,6 +653,7 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         if (nearest != null && nearestDist > 4) {
             moveTarget = nearest.getPos();
             this.setSprinting(nearestDist > 100);
+            isSprinting = nearestDist > 100;
         }
     }
 
@@ -316,6 +667,34 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         );
         moveTarget = explore;
     }
+
+    private void fleeFrom(ServerWorld world) {
+        // Run away from nearest hostile
+        LivingEntity threat = null;
+        double nearestDist = Double.MAX_VALUE;
+
+        for (Entity entity : world.iterateEntities()) {
+            if (entity instanceof HostileEntity hostile && entity != this) {
+                double dist = this.squaredDistanceTo(hostile);
+                if (dist < nearestDist && dist < 256) {
+                    nearestDist = dist;
+                    threat = hostile;
+                }
+            }
+        }
+
+        if (threat != null) {
+            Vec3d awayDir = this.getPos().subtract(threat.getPos()).normalize().multiply(15);
+            moveTarget = this.getPos().add(awayDir);
+            isSprinting = true;
+            this.setSprinting(true);
+        } else {
+            // No threat found, just wander
+            exploreRandom(world);
+        }
+    }
+
+    // ======================== OVERRIDES ========================
 
     @Override
     public boolean isSpectator() {
@@ -331,10 +710,113 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         return brain;
     }
 
-    // =========================================================
-    // Fake network handler — initially set, then replaced by
-    // onPlayerConnect with a real handler using our fake connection
-    // =========================================================
+    // ======================== CRAFTING RECIPES ========================
+
+    /**
+     * Simple hardcoded recipe system for common Minecraft items.
+     */
+    private static class Ingredient {
+        final Item item;
+        final int count;
+
+        Ingredient(Item item, int count) {
+            this.item = item;
+            this.count = count;
+        }
+    }
+
+    private static class CraftingRecipe {
+        final Item resultItem;
+        final String resultName;
+        final int resultCount;
+        final Ingredient[] ingredients;
+
+        CraftingRecipe(Item resultItem, String resultName, int resultCount, Ingredient... ingredients) {
+            this.resultItem = resultItem;
+            this.resultName = resultName;
+            this.resultCount = resultCount;
+            this.ingredients = ingredients;
+        }
+
+        private static final Map<String, CraftingRecipe> RECIPES = new HashMap<>();
+
+        static {
+            // Planks from logs
+            RECIPES.put("oak_planks", new CraftingRecipe(Items.OAK_PLANKS, "Oak Planks", 4,
+                new Ingredient(Items.OAK_LOG, 1)));
+            RECIPES.put("birch_planks", new CraftingRecipe(Items.BIRCH_PLANKS, "Birch Planks", 4,
+                new Ingredient(Items.BIRCH_LOG, 1)));
+            RECIPES.put("spruce_planks", new CraftingRecipe(Items.SPRUCE_PLANKS, "Spruce Planks", 4,
+                new Ingredient(Items.SPRUCE_LOG, 1)));
+            RECIPES.put("dark_oak_planks", new CraftingRecipe(Items.DARK_OAK_PLANKS, "Dark Oak Planks", 4,
+                new Ingredient(Items.DARK_OAK_LOG, 1)));
+
+            // Sticks from planks
+            RECIPES.put("sticks", new CraftingRecipe(Items.STICK, "Sticks", 4,
+                new Ingredient(Items.OAK_PLANKS, 2)));
+            RECIPES.put("oak_sticks", new CraftingRecipe(Items.STICK, "Sticks", 4,
+                new Ingredient(Items.OAK_PLANKS, 2)));
+
+            // Crafting table
+            RECIPES.put("crafting_table", new CraftingRecipe(Items.CRAFTING_TABLE, "Crafting Table", 1,
+                new Ingredient(Items.OAK_PLANKS, 4)));
+
+            // Wooden tools
+            RECIPES.put("wooden_pickaxe", new CraftingRecipe(Items.WOODEN_PICKAXE, "Wooden Pickaxe", 1,
+                new Ingredient(Items.OAK_PLANKS, 3),
+                new Ingredient(Items.STICK, 2)));
+            RECIPES.put("wooden_axe", new CraftingRecipe(Items.WOODEN_AXE, "Wooden Axe", 1,
+                new Ingredient(Items.OAK_PLANKS, 3),
+                new Ingredient(Items.STICK, 2)));
+            RECIPES.put("wooden_sword", new CraftingRecipe(Items.WOODEN_SWORD, "Wooden Sword", 1,
+                new Ingredient(Items.OAK_PLANKS, 2),
+                new Ingredient(Items.STICK, 1)));
+            RECIPES.put("wooden_shovel", new CraftingRecipe(Items.WOODEN_SHOVEL, "Wooden Shovel", 1,
+                new Ingredient(Items.OAK_PLANKS, 1),
+                new Ingredient(Items.STICK, 2)));
+            RECIPES.put("wooden_hoe", new CraftingRecipe(Items.WOODEN_HOE, "Wooden Hoe", 1,
+                new Ingredient(Items.OAK_PLANKS, 2),
+                new Ingredient(Items.STICK, 2)));
+
+            // Stone tools
+            RECIPES.put("stone_pickaxe", new CraftingRecipe(Items.STONE_PICKAXE, "Stone Pickaxe", 1,
+                new Ingredient(Items.COBBLESTONE, 3),
+                new Ingredient(Items.STICK, 2)));
+            RECIPES.put("stone_axe", new CraftingRecipe(Items.STONE_AXE, "Stone Axe", 1,
+                new Ingredient(Items.COBBLESTONE, 3),
+                new Ingredient(Items.STICK, 2)));
+            RECIPES.put("stone_sword", new CraftingRecipe(Items.STONE_SWORD, "Stone Sword", 1,
+                new Ingredient(Items.COBBLESTONE, 2),
+                new Ingredient(Items.STICK, 1)));
+            RECIPES.put("stone_shovel", new CraftingRecipe(Items.STONE_SHOVEL, "Stone Shovel", 1,
+                new Ingredient(Items.COBBLESTONE, 1),
+                new Ingredient(Items.STICK, 2)));
+
+            // Furnace
+            RECIPES.put("furnace", new CraftingRecipe(Items.FURNACE, "Furnace", 1,
+                new Ingredient(Items.COBBLESTONE, 8)));
+
+            // Chest
+            RECIPES.put("chest", new CraftingRecipe(Items.CHEST, "Chest", 1,
+                new Ingredient(Items.OAK_PLANKS, 8)));
+
+            // Torches
+            RECIPES.put("torches", new CraftingRecipe(Items.TORCH, "Torches", 4,
+                new Ingredient(Items.STICK, 1),
+                new Ingredient(Items.COAL, 1)));
+        }
+
+        static CraftingRecipe get(String id) {
+            return RECIPES.get(id);
+        }
+
+        static Set<String> availableRecipes() {
+            return RECIPES.keySet();
+        }
+    }
+
+    // ======================== FAKE NETWORK ========================
+
     private static class FakeNetworkHandler extends ServerPlayNetworkHandler {
 
         public FakeNetworkHandler(MinecraftServer server, ServerPlayerEntity player, ClientConnection connection) {
@@ -357,16 +839,6 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         }
     }
 
-    // =========================================================
-    // Fake ClientConnection — safely discards all packets without
-    // touching the Netty channel (which doesn't exist).
-    //
-    // CRITICAL: We must override BOTH send() variants.
-    // ServerPlayNetworkHandler.sendPacket() calls the 2-arg
-    // version: send(Packet, PacketCallbacks). Without this
-    // override, the parent class tries to write to a null
-    // Netty Channel → NullPointerException crash.
-    // =========================================================
     private static class FakeClientConnection extends ClientConnection {
 
         public FakeClientConnection() {
@@ -388,31 +860,24 @@ public class GroqFakePlayer extends ServerPlayerEntity {
             return new InetSocketAddress("localhost", 0);
         }
 
-        /**
-         * Discard outgoing packets (1-arg version).
-         * The bot has no real client, so all packets are silently dropped.
-         */
         @Override
         public void send(Packet<?> packet) {
             // Silently discard
         }
 
-        /**
-         * Discard outgoing packets (2-arg version with PacketCallbacks).
-         * This is the version called by ServerPlayNetworkHandler.sendPacket()
-         * and other internal server methods. Without this override, the
-         * parent ClientConnection.send() tries to access the null Netty
-         * Channel field, causing a NullPointerException that crashes the server.
-         */
         @Override
         public void send(Packet<?> packet, PacketCallbacks callbacks) {
             // Silently discard both the packet and any callbacks
+            if (callbacks != null) {
+                try {
+                    callbacks.onSuccess();
+                } catch (Exception ignored) {}
+            }
         }
 
         @Override
         public void tick() {
-            // Prevent the connection from trying to flush the null Netty channel.
-            // The default tick() calls flush() which may access the channel.
+            // Prevent the connection from trying to flush the null Netty channel
         }
 
         @Override
