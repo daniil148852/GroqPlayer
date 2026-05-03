@@ -24,9 +24,6 @@ import net.minecraft.util.Hand;
 import net.minecraft.util.math.*;
 import net.minecraft.world.GameMode;
 
-import io.netty.util.concurrent.GenericFutureListener;
-import io.netty.util.concurrent.Future;
-
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.List;
@@ -391,17 +388,6 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         @Override
         public void send(Packet<?> packet) {
             // Silently discard
-        }
-
-        /**
-         * Intercept the 2-arg send variant that the server calls
-         * internally (e.g. during onPlayerConnect). The default
-         * implementation writes to the Netty channel → NPE.
-         * We just discard and ignore the listener.
-         */
-        @Override
-        public void send(Packet<?> packet, GenericFutureListener<? extends io.netty.util.concurrent.Future<? super Void>> listener) {
-            // Silently discard — don't notify listener to avoid type issues
         }
 
         @Override
