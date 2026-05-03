@@ -108,8 +108,6 @@ jobs:
 
       - name: Build for release
         run: ./gradlew remapJar remapSourcesJar --no-daemon
-        env:
-          GRADLE_OPTS: "-Xmx2g"
 
       - name: Get version info
         id: version
