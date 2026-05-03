@@ -51,13 +51,9 @@ jobs:
 
       - name: Build mod (remapJar)
         run: ./gradlew remapJar --no-daemon --stacktrace
-        env:
-          GRADLE_OPTS: "-Xmx2g"
 
       - name: Build sources jar
         run: ./gradlew remapSourcesJar --no-daemon
-        env:
-          GRADLE_OPTS: "-Xmx2g"
 
       - name: Get mod version
         id: mod_version
