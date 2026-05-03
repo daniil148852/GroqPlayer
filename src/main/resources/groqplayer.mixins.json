@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.groqplayer.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "ServerPlayerMixin"
+  ],
+  "client": [
+    "ClientPlayerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

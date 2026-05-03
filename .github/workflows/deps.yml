@@ -1,0 +1,26 @@
+name: Dependency Check
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # Every Monday at 9:00 UTC
+  workflow_dispatch:
+
+jobs:
+  check-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Grant execute permission
+        run: chmod +x gradlew
+
+      - name: Check for dependency updates
+        run: ./gradlew dependencies --no-daemon 2>&1 | head -100
+        env:
+          GRADLE_OPTS: "-Xmx3g"

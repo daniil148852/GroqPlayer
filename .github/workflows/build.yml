@@ -1,0 +1,152 @@
+name: Build GroqPlayer Mod
+
+on:
+  push:
+    branches: [ main, master, dev ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: wrapper
+
+      - name: Grant execute permission to gradlew
+        run: chmod +x gradlew
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            .gradle
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Build mod (remapJar)
+        run: ./gradlew remapJar --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: "-Xmx2g"
+
+      - name: Build sources jar
+        run: ./gradlew remapSourcesJar --no-daemon
+        env:
+          GRADLE_OPTS: "-Xmx2g"
+
+      - name: Get mod version
+        id: mod_version
+        run: |
+          VERSION=$(grep '^mod_version=' gradle.properties | cut -d'=' -f2)
+          MC_VERSION=$(grep '^minecraft_version=' gradle.properties | cut -d'=' -f2)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "mc_version=$MC_VERSION" >> $GITHUB_OUTPUT
+          echo "artifact_name=groqplayer-${VERSION}+${MC_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.mod_version.outputs.artifact_name }}
+          path: |
+            build/libs/*.jar
+          retention-days: 30
+
+      - name: Upload sources artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.mod_version.outputs.artifact_name }}-sources
+          path: build/libs/*-sources.jar
+          retention-days: 30
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Grant execute permission to gradlew
+        run: chmod +x gradlew
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+
+      - name: Build for release
+        run: ./gradlew remapJar remapSourcesJar --no-daemon
+        env:
+          GRADLE_OPTS: "-Xmx2g"
+
+      - name: Get version info
+        id: version
+        run: |
+          VERSION=$(grep '^mod_version=' gradle.properties | cut -d'=' -f2)
+          MC_VERSION=$(grep '^minecraft_version=' gradle.properties | cut -d'=' -f2)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "mc_version=$MC_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "GroqPlayer v${{ steps.version.outputs.version }} (MC ${{ steps.version.outputs.mc_version }})"
+          body: |
+            ## GroqPlayer Mod v${{ steps.version.outputs.version }}
+            
+            **Minecraft:** ${{ steps.version.outputs.mc_version }}
+            **Loader:** Fabric
+            
+            ### Installation
+            1. Install [Fabric Loader](https://fabricmc.net/use/installer/) for MC ${{ steps.version.outputs.mc_version }}
+            2. Install [Fabric API](https://modrinth.com/mod/fabric-api)
+            3. Drop `groqplayer-${{ steps.version.outputs.version }}.jar` into your `mods/` folder
+            4. Get a free [Groq API key](https://console.groq.com)
+            5. In-game: `/groqplayer setkey YOUR_KEY`
+            6. Spawn an AI player: `/groqplayer spawn Steve "adventurous miner"`
+            
+            ### Included Files
+            - `groqplayer-${{ steps.version.outputs.version }}+${{ steps.version.outputs.mc_version }}.jar` — main mod jar
+            - `groqplayer-${{ steps.version.outputs.version }}+${{ steps.version.outputs.mc_version }}-sources.jar` — source code
+          files: |
+            build/libs/*.jar
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

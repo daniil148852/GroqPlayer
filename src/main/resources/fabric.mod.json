@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "groqplayer",
+  "version": "${version}",
+  "name": "GroqPlayer",
+  "description": "Adds an AI-powered player bot connected via Groq API that behaves like a real player.",
+  "authors": ["GroqPlayer Team"],
+  "contact": {
+    "sources": "https://github.com/yourusername/groqplayer-mod"
+  },
+  "license": "MIT",
+  "icon": "assets/groqplayer/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["dev.groqplayer.GroqPlayerMod"],
+    "client": ["dev.groqplayer.GroqPlayerClient"]
+  },
+  "mixins": ["groqplayer.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.15.0",
+    "fabric-api": "*",
+    "minecraft": "~1.20.1"
+  }
+}
