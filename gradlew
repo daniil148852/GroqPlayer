@@ -12,6 +12,20 @@
 APP_NAME="Gradle"
 APP_BASE_NAME=`basename "$0"`
 
+# Resolve APP_HOME to the directory containing this script
+PRG="$0"
+while [ -h "$PRG" ]; do
+    ls=`ls -ld "$PRG"`
+    link=`expr "$ls" : '.*-> \(.*\)$'`
+    if expr "$link" : '/.*' > /dev/null; then
+        PRG="$link"
+    else
+        PRG=`dirname "$PRG"`/"$link"
+    fi
+done
+APP_HOME=`dirname "$PRG"`
+APP_HOME=`cd "$APP_HOME" && pwd`
+
 # Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
 DEFAULT_JVM_OPTS='-Xmx64m -Xms64m'
 
