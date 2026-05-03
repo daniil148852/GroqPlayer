@@ -14,6 +14,7 @@ import net.minecraft.item.FoodComponent;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.ClientConnection;
 import net.minecraft.network.NetworkSide;
+import net.minecraft.network.PacketCallbacks;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayNetworkHandler;
@@ -23,6 +24,14 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.*;
 import net.minecraft.world.GameMode;
+
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelConfig;
+import io.netty.channel.ChannelMetadata;
+import io.netty.channel.DefaultChannelConfig;
+import io.netty.util.concurrent.GenericFutureListener;
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.Promise;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -48,8 +57,12 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         super(server, world, profile);
         this.brain = new GroqAIBrain(profile.getName(), personality);
 
-        // Create fake connection and network handler
+        // Create fake connection that safely discards all packets
         this.fakeConnection = new FakeClientConnection();
+
+        // Create a fake network handler — note: onPlayerConnect will replace this
+        // with a real ServerPlayNetworkHandler, but our FakeClientConnection
+        // will still be used for packet sending
         this.networkHandler = new FakeNetworkHandler(server, this, fakeConnection);
 
         // Set game mode via ServerPlayerEntity method
@@ -67,7 +80,14 @@ public class GroqFakePlayer extends ServerPlayerEntity {
 
     @Override
     public void tick() {
-        super.tick();
+        // Prevent super.tick() from crashing — the real ServerPlayNetworkHandler
+        // created by onPlayerConnect may try to tick the connection
+        try {
+            super.tick();
+        } catch (Exception e) {
+            // Silently catch network-related errors from the handler tick
+            GroqPlayerMod.LOGGER.debug("[GroqPlayer] Ignored tick error for {}: {}", this.getName().getString(), e.getMessage());
+        }
 
         if (this.getWorld().isClient()) return;
 
@@ -159,7 +179,6 @@ public class GroqFakePlayer extends ServerPlayerEntity {
             case "place" -> placeBlock(action.target(), world);
             case "use_item" -> {
                 this.swingHand(Hand.MAIN_HAND);
-                // Use interact on main hand item (e.g., eat food, throw item)
                 ItemStack held = this.getMainHandStack();
                 if (!held.isEmpty()) {
                     this.setCurrentHand(Hand.MAIN_HAND);
@@ -182,16 +201,13 @@ public class GroqFakePlayer extends ServerPlayerEntity {
 
         if (dist < 0.5) return;
 
-        // Calculate yaw to face target
         float targetYaw = (float) (Math.toDegrees(Math.atan2(-diff.x, diff.z)));
         this.setYaw(targetYaw);
 
-        // Calculate velocity
         double speed = isSprinting ? 0.2 : 0.15;
         Vec3d normalized = new Vec3d(diff.x / dist, 0, diff.z / dist);
         this.setVelocity(normalized.multiply(speed).add(0, this.getVelocity().y, 0));
 
-        // Jump over obstacles
         BlockPos frontPos = BlockPos.ofFloored(pos.add(normalized.multiply(0.6)));
         if (!this.getWorld().getBlockState(frontPos).isAir() && this.isOnGround()) {
             this.jump();
@@ -202,7 +218,6 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         if (actionCooldown > 0) return;
         actionCooldown = 20;
 
-        // Find nearest hostile mob first
         LivingEntity target = null;
         double nearestDist = Double.MAX_VALUE;
 
@@ -245,7 +260,6 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         BlockPos targetPos = BlockPos.ofFloored(pos);
         if (!world.getBlockState(targetPos).isAir()) return;
 
-        // Simple block placement
         this.swingHand(Hand.MAIN_HAND);
     }
 
@@ -256,7 +270,6 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         for (ItemEntity itemEntity : items) {
             Vec3d toItem = itemEntity.getPos().subtract(this.getPos()).normalize().multiply(0.3);
             itemEntity.setVelocity(toItem.negate());
-            // Actual collection handled by vanilla pickup logic
         }
     }
 
@@ -327,7 +340,8 @@ public class GroqFakePlayer extends ServerPlayerEntity {
     }
 
     // =========================================================
-    // Fake network handler - required for ServerPlayerEntity
+    // Fake network handler — initially set, then replaced by
+    // onPlayerConnect with a real handler using our fake connection
     // =========================================================
     private static class FakeNetworkHandler extends ServerPlayNetworkHandler {
 
@@ -337,7 +351,7 @@ public class GroqFakePlayer extends ServerPlayerEntity {
 
         @Override
         public void disconnect(Text reason) {
-            // Prevent disconnect
+            // Prevent disconnect — bot should stay online
         }
 
         @Override
@@ -347,10 +361,18 @@ public class GroqFakePlayer extends ServerPlayerEntity {
 
         @Override
         public void sendPacket(Packet<?> packet) {
-            // Discard packets — bot doesn't have a real client
+            // Discard — bot has no real client
         }
     }
 
+    // =========================================================
+    // Fake ClientConnection — safely discards all packets without
+    // touching the Netty channel (which doesn't exist).
+    //
+    // Key: we override BOTH send() variants because the server
+    // calls the 2-arg version internally. The original 2-arg
+    // send() tries to write to a null Netty Channel → NPE.
+    // =========================================================
     private static class FakeClientConnection extends ClientConnection {
 
         public FakeClientConnection() {
@@ -369,7 +391,34 @@ public class GroqFakePlayer extends ServerPlayerEntity {
 
         @Override
         public void send(Packet<?> packet) {
-            // Discard all packets — bot doesn't have a real client
+            // Discard — bot has no real client
+        }
+
+        /**
+         * Override the 2-arg send() that the server calls internally
+         * (e.g. from onPlayerConnect). Without this, the default
+         * implementation tries to write to a null Netty Channel.
+         */
+        @Override
+        public void send(Packet<?> packet, GenericFutureListener<? extends Future<? super Void>> listener) {
+            // Discard packet, but notify the listener of success so
+            // the server doesn't think the send failed
+            if (listener != null) {
+                try {
+                    // Create a placeholder promise and succeed it immediately
+                    io.netty.channel.DefaultChannelPromise promise =
+                        new io.netty.channel.DefaultChannelPromise(null);
+                    promise.trySuccess();
+                    listener.operationComplete(promise);
+                } catch (Exception e) {
+                    // Ignore listener errors
+                }
+            }
+        }
+
+        @Override
+        public void handleDisconnection() {
+            // Prevent the connection from being cleaned up
         }
     }
 }

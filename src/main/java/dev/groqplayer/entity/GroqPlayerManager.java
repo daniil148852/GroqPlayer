@@ -27,31 +27,42 @@ public class GroqPlayerManager {
             return false;
         }
 
-        ServerWorld world = server.getOverworld();
+        try {
+            ServerWorld world = server.getOverworld();
 
-        // Create unique UUID based on name (consistent across restarts)
-        UUID uuid = UUID.nameUUIDFromBytes(("GroqPlayer:" + name).getBytes());
-        GameProfile profile = new GameProfile(uuid, name);
+            // Create unique UUID based on name (consistent across restarts)
+            UUID uuid = UUID.nameUUIDFromBytes(("GroqPlayer:" + name).getBytes());
+            GameProfile profile = new GameProfile(uuid, name);
 
-        GroqFakePlayer fakePlayer = new GroqFakePlayer(server, world, profile, personality);
-        fakePlayer.setPos(pos.x, pos.y, pos.z);
-        fakePlayer.setHealth(20.0f);
-        fakePlayer.getHungerManager().setFoodLevel(20);
+            GroqFakePlayer fakePlayer = new GroqFakePlayer(server, world, profile, personality);
+            fakePlayer.setPos(pos.x, pos.y, pos.z);
+            fakePlayer.setHealth(20.0f);
+            fakePlayer.getHungerManager().setFoodLevel(20);
 
-        // Add to world — onPlayerConnect expects (ClientConnection, ServerPlayerEntity)
-        ClientConnection fakeConnection = fakePlayer.getFakeConnection();
-        server.getPlayerManager().onPlayerConnect(fakeConnection, fakePlayer);
-        world.onPlayerConnected(fakePlayer);
+            // Connect the fake player — onPlayerConnect expects (ClientConnection, ServerPlayerEntity)
+            // It will create a real ServerPlayNetworkHandler internally that uses our FakeClientConnection
+            ClientConnection fakeConnection = fakePlayer.getFakeConnection();
+            server.getPlayerManager().onPlayerConnect(fakeConnection, fakePlayer);
 
-        // Broadcast join message
-        server.getPlayerManager().broadcast(
-            Text.literal("§a" + name + " §7joined the game (AI Player)"),
-            false
-        );
+            // Also notify the world that the player has connected
+            world.onPlayerConnected(fakePlayer);
 
-        activePlayers.put(name, fakePlayer);
-        LOGGER.info("[GroqPlayer] Spawned AI player '{}' at {}", name, pos);
-        return true;
+            // Broadcast join message
+            server.getPlayerManager().broadcast(
+                Text.literal("§a" + name + " §7joined the game (AI Player)"),
+                false
+            );
+
+            activePlayers.put(name, fakePlayer);
+            LOGGER.info("[GroqPlayer] Spawned AI player '{}' at {}", name, pos);
+            return true;
+
+        } catch (Exception e) {
+            LOGGER.error("[GroqPlayer] Failed to spawn AI player '{}': {}", name, e.getMessage(), e);
+            // Clean up partial state
+            activePlayers.remove(name);
+            return false;
+        }
     }
 
     /**
@@ -63,7 +74,11 @@ public class GroqPlayerManager {
             return false;
         }
 
-        server.getPlayerManager().remove(player);
+        try {
+            server.getPlayerManager().remove(player);
+        } catch (Exception e) {
+            LOGGER.warn("[GroqPlayer] Error removing player '{}': {}", name, e.getMessage());
+        }
 
         server.getPlayerManager().broadcast(
             Text.literal("§c" + name + " §7left the game (AI Player)"),
