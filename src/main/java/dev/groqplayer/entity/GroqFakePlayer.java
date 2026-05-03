@@ -14,7 +14,6 @@ import net.minecraft.item.FoodComponent;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.ClientConnection;
 import net.minecraft.network.NetworkSide;
-import net.minecraft.network.PacketCallbacks;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayNetworkHandler;
@@ -24,8 +23,6 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.*;
 import net.minecraft.world.GameMode;
-
-import io.netty.util.concurrent.GenericFutureListener;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -55,8 +52,8 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         this.fakeConnection = new FakeClientConnection();
         this.networkHandler = new FakeNetworkHandler(server, this, fakeConnection);
 
-        // Set game mode via interaction manager (setGameMode requires previous and new mode)
-        this.interactionManager.setGameMode(GameMode.SURVIVAL, GameMode.SURVIVAL);
+        // Set game mode via ServerPlayerEntity method
+        this.changeGameMode(GameMode.SURVIVAL);
         this.setNoGravity(false);
     }
 
@@ -371,7 +368,7 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         }
 
         @Override
-        public void send(Packet<?> packet, GenericFutureListener<? extends io.netty.util.concurrent.Future<? super Void>> listener, PacketCallbacks callbacks) {
+        public void send(Packet<?> packet) {
             // Discard all packets — bot doesn't have a real client
         }
     }
