@@ -14,7 +14,6 @@ import net.minecraft.item.FoodComponent;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.ClientConnection;
 import net.minecraft.network.NetworkSide;
-import net.minecraft.network.PacketCallbacks;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayNetworkHandler;
@@ -25,13 +24,8 @@ import net.minecraft.util.Hand;
 import net.minecraft.util.math.*;
 import net.minecraft.world.GameMode;
 
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelConfig;
-import io.netty.channel.ChannelMetadata;
-import io.netty.channel.DefaultChannelConfig;
 import io.netty.util.concurrent.GenericFutureListener;
 import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.Promise;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -389,31 +383,25 @@ public class GroqFakePlayer extends ServerPlayerEntity {
             return new InetSocketAddress("localhost", 0);
         }
 
+        /**
+         * Discard all outgoing packets — the bot has no real client.
+         * Overriding this prevents the default implementation from
+         * trying to write to a null Netty Channel.
+         */
         @Override
         public void send(Packet<?> packet) {
-            // Discard — bot has no real client
+            // Silently discard
         }
 
         /**
-         * Override the 2-arg send() that the server calls internally
-         * (e.g. from onPlayerConnect). Without this, the default
-         * implementation tries to write to a null Netty Channel.
+         * Intercept the 2-arg send variant that the server calls
+         * internally (e.g. during onPlayerConnect). The default
+         * implementation writes to the Netty channel → NPE.
+         * We just discard and ignore the listener.
          */
         @Override
-        public void send(Packet<?> packet, GenericFutureListener<? extends Future<? super Void>> listener) {
-            // Discard packet, but notify the listener of success so
-            // the server doesn't think the send failed
-            if (listener != null) {
-                try {
-                    // Create a placeholder promise and succeed it immediately
-                    io.netty.channel.DefaultChannelPromise promise =
-                        new io.netty.channel.DefaultChannelPromise(null);
-                    promise.trySuccess();
-                    listener.operationComplete(promise);
-                } catch (Exception e) {
-                    // Ignore listener errors
-                }
-            }
+        public void send(Packet<?> packet, GenericFutureListener<? extends io.netty.util.concurrent.Future<? super Void>> listener) {
+            // Silently discard — don't notify listener to avoid type issues
         }
 
         @Override
