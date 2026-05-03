@@ -3,6 +3,7 @@
   "minVersion": "0.8",
   "package": "dev.groqplayer.mixin",
   "compatibilityLevel": "JAVA_17",
+  "plugin": "net.fabricmc.loom.task.GenerateSourcesTask",
   "mixins": [
     "ServerPlayerMixin"
   ],
