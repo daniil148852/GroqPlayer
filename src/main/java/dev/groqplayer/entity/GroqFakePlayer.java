@@ -14,6 +14,7 @@ import net.minecraft.item.FoodComponent;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.ClientConnection;
 import net.minecraft.network.NetworkSide;
+import net.minecraft.network.PacketCallbacks;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayNetworkHandler;
@@ -360,9 +361,11 @@ public class GroqFakePlayer extends ServerPlayerEntity {
     // Fake ClientConnection — safely discards all packets without
     // touching the Netty channel (which doesn't exist).
     //
-    // Key: we override BOTH send() variants because the server
-    // calls the 2-arg version internally. The original 2-arg
-    // send() tries to write to a null Netty Channel → NPE.
+    // CRITICAL: We must override BOTH send() variants.
+    // ServerPlayNetworkHandler.sendPacket() calls the 2-arg
+    // version: send(Packet, PacketCallbacks). Without this
+    // override, the parent class tries to write to a null
+    // Netty Channel → NullPointerException crash.
     // =========================================================
     private static class FakeClientConnection extends ClientConnection {
 
@@ -376,18 +379,40 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         }
 
         @Override
+        public boolean isLocal() {
+            return true;
+        }
+
+        @Override
         public SocketAddress getAddress() {
             return new InetSocketAddress("localhost", 0);
         }
 
         /**
-         * Discard all outgoing packets — the bot has no real client.
-         * Overriding this prevents the default implementation from
-         * trying to write to a null Netty Channel.
+         * Discard outgoing packets (1-arg version).
+         * The bot has no real client, so all packets are silently dropped.
          */
         @Override
         public void send(Packet<?> packet) {
             // Silently discard
+        }
+
+        /**
+         * Discard outgoing packets (2-arg version with PacketCallbacks).
+         * This is the version called by ServerPlayNetworkHandler.sendPacket()
+         * and other internal server methods. Without this override, the
+         * parent ClientConnection.send() tries to access the null Netty
+         * Channel field, causing a NullPointerException that crashes the server.
+         */
+        @Override
+        public void send(Packet<?> packet, PacketCallbacks callbacks) {
+            // Silently discard both the packet and any callbacks
+        }
+
+        @Override
+        public void tick() {
+            // Prevent the connection from trying to flush the null Netty channel.
+            // The default tick() calls flush() which may access the channel.
         }
 
         @Override
