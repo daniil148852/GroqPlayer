@@ -55,8 +55,8 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         this.fakeConnection = new FakeClientConnection();
         this.networkHandler = new FakeNetworkHandler(server, this, fakeConnection);
 
-        // Set game mode via interaction manager
-        this.interactionManager.setGameMode(GameMode.SURVIVAL);
+        // Set game mode via interaction manager (setGameMode requires previous and new mode)
+        this.interactionManager.setGameMode(GameMode.SURVIVAL, GameMode.SURVIVAL);
         this.setNoGravity(false);
     }
 
@@ -371,8 +371,8 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         }
 
         @Override
-        public void sendImmediately(Packet<?> packet, GenericFutureListener<? extends io.netty.util.concurrent.Future<? super Void>> listener) {
-            // Discard
+        public void send(Packet<?> packet, GenericFutureListener<? extends io.netty.util.concurrent.Future<? super Void>> listener, PacketCallbacks callbacks) {
+            // Discard all packets — bot doesn't have a real client
         }
     }
 }
