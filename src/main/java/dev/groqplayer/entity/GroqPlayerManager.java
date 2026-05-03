@@ -2,6 +2,7 @@ package dev.groqplayer.entity;
 
 import com.mojang.authlib.GameProfile;
 import dev.groqplayer.GroqPlayerMod;
+import net.minecraft.entity.Entity;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
