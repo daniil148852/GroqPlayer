@@ -4,6 +4,7 @@ import com.mojang.authlib.GameProfile;
 import dev.groqplayer.GroqPlayerMod;
 import dev.groqplayer.ai.GroqAIBrain;
 import net.minecraft.block.BlockState;
+import net.minecraft.command.EntityAnchorArgument;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.LivingEntity;
@@ -11,7 +12,10 @@ import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.FoodComponent;
 import net.minecraft.item.ItemStack;
-import net.minecraft.network.packet.s2c.play.PlayerSpawnS2CPacket;
+import net.minecraft.network.ClientConnection;
+import net.minecraft.network.NetworkSide;
+import net.minecraft.network.PacketCallbacks;
+import net.minecraft.network.packet.Packet;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayNetworkHandler;
 import net.minecraft.server.network.ServerPlayerEntity;
@@ -21,6 +25,8 @@ import net.minecraft.util.Hand;
 import net.minecraft.util.math.*;
 import net.minecraft.world.GameMode;
 
+import io.netty.util.concurrent.GenericFutureListener;
+
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.List;
@@ -29,6 +35,7 @@ import java.util.UUID;
 public class GroqFakePlayer extends ServerPlayerEntity {
 
     private final GroqAIBrain brain;
+    private final FakeClientConnection fakeConnection;
     private int thinkTimer = 0;
     private static final int THINK_INTERVAL = 60; // 3 seconds
 
@@ -41,13 +48,24 @@ public class GroqFakePlayer extends ServerPlayerEntity {
     private float lookPitch = 0;
 
     public GroqFakePlayer(MinecraftServer server, ServerWorld world, GameProfile profile, String personality) {
-        super(server, world, profile, null);
+        super(server, world, profile);
         this.brain = new GroqAIBrain(profile.getName(), personality);
 
-        // Make it look like a normal player
-        this.networkHandler = new FakeNetworkHandler(server, this);
-        this.setGameMode(GameMode.SURVIVAL);
+        // Create fake connection and network handler
+        this.fakeConnection = new FakeClientConnection();
+        this.networkHandler = new FakeNetworkHandler(server, this, fakeConnection);
+
+        // Set game mode via interaction manager
+        this.interactionManager.setGameMode(GameMode.SURVIVAL);
         this.setNoGravity(false);
+    }
+
+    /**
+     * Returns the fake ClientConnection used by this AI player.
+     * Needed by GroqPlayerManager to call onPlayerConnect.
+     */
+    public FakeClientConnection getFakeConnection() {
+        return fakeConnection;
     }
 
     @Override
@@ -105,12 +123,16 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         // Auto-eat when hungry
         autoEat();
 
-        // Gravity / physics - handled by super.tick()
         // Respawn if dead
         if (this.isDead() || this.getHealth() <= 0) {
             this.setHealth(this.getMaxHealth());
-            this.setPos(this.getSpawnPointPosition() != null ?
-                Vec3d.ofCenter(this.getSpawnPointPosition()) : Vec3d.ofCenter(world.getSpawnPos()));
+            BlockPos spawnPos = this.getSpawnPointPosition();
+            if (spawnPos != null) {
+                this.setPos(spawnPos.getX() + 0.5, spawnPos.getY(), spawnPos.getZ() + 0.5);
+            } else {
+                BlockPos worldSpawn = world.getSpawnPos();
+                this.setPos(worldSpawn.getX() + 0.5, worldSpawn.getY(), worldSpawn.getZ() + 0.5);
+            }
             this.server.getPlayerManager().broadcast(
                 Text.literal("§e[GroqPlayer] §f" + this.getName().getString() + " respawned."),
                 false
@@ -140,7 +162,11 @@ public class GroqFakePlayer extends ServerPlayerEntity {
             case "place" -> placeBlock(action.target(), world);
             case "use_item" -> {
                 this.swingHand(Hand.MAIN_HAND);
-                this.useItem(Hand.MAIN_HAND);
+                // Use interact on main hand item (e.g., eat food, throw item)
+                ItemStack held = this.getMainHandStack();
+                if (!held.isEmpty()) {
+                    this.setCurrentHand(Hand.MAIN_HAND);
+                }
             }
             case "eat" -> autoEat();
             case "look_around" -> startLookAround();
@@ -194,7 +220,7 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         }
 
         if (target != null) {
-            this.lookAt(net.minecraft.entity.EntityAnchorArgument.EntityAnchor.EYES, target.getPos());
+            this.lookAt(EntityAnchorArgument.EntityAnchor.EYES, target.getPos());
             this.attack(target);
             this.swingHand(Hand.MAIN_HAND);
         }
@@ -246,7 +272,7 @@ public class GroqFakePlayer extends ServerPlayerEntity {
                 FoodComponent food = stack.getItem().getFoodComponent();
                 if (food != null) {
                     this.getInventory().selectedSlot = i < 9 ? i : this.getInventory().selectedSlot;
-                    this.useItem(Hand.MAIN_HAND);
+                    this.setCurrentHand(Hand.MAIN_HAND);
                     break;
                 }
             }
@@ -308,8 +334,8 @@ public class GroqFakePlayer extends ServerPlayerEntity {
     // =========================================================
     private static class FakeNetworkHandler extends ServerPlayNetworkHandler {
 
-        public FakeNetworkHandler(MinecraftServer server, ServerPlayerEntity player) {
-            super(server, new FakeClientConnection(), player);
+        public FakeNetworkHandler(MinecraftServer server, ServerPlayerEntity player, ClientConnection connection) {
+            super(server, connection, player);
         }
 
         @Override
@@ -323,15 +349,15 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         }
 
         @Override
-        public void sendPacket(net.minecraft.network.packet.Packet<?> packet) {
+        public void sendPacket(Packet<?> packet) {
             // Discard packets — bot doesn't have a real client
         }
     }
 
-    private static class FakeClientConnection extends net.minecraft.network.ClientConnection {
+    private static class FakeClientConnection extends ClientConnection {
 
         public FakeClientConnection() {
-            super(net.minecraft.network.NetworkSide.CLIENTBOUND);
+            super(NetworkSide.CLIENTBOUND);
         }
 
         @Override
@@ -345,7 +371,7 @@ public class GroqFakePlayer extends ServerPlayerEntity {
         }
 
         @Override
-        public void sendImmediately(net.minecraft.network.packet.Packet<?> packet, io.netty.util.concurrent.GenericFutureListener<?> listener, net.minecraft.network.PacketCallbacks callbacks) {
+        public void sendImmediately(Packet<?> packet, GenericFutureListener<? extends io.netty.util.concurrent.Future<? super Void>> listener) {
             // Discard
         }
     }

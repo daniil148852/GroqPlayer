@@ -2,7 +2,7 @@ package dev.groqplayer.entity;
 
 import com.mojang.authlib.GameProfile;
 import dev.groqplayer.GroqPlayerMod;
-import net.minecraft.entity.Entity;
+import net.minecraft.network.ClientConnection;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -38,9 +38,10 @@ public class GroqPlayerManager {
         fakePlayer.setHealth(20.0f);
         fakePlayer.getHungerManager().setFoodLevel(20);
 
-        // Add to world
+        // Add to world — onPlayerConnect expects (ClientConnection, ServerPlayerEntity)
+        ClientConnection fakeConnection = fakePlayer.getFakeConnection();
+        server.getPlayerManager().onPlayerConnect(fakeConnection, fakePlayer);
         world.onPlayerConnected(fakePlayer);
-        server.getPlayerManager().onPlayerConnect(fakePlayer.networkHandler, fakePlayer);
 
         // Broadcast join message
         server.getPlayerManager().broadcast(
@@ -62,8 +63,6 @@ public class GroqPlayerManager {
             return false;
         }
 
-        ServerWorld world = server.getOverworld();
-        world.removePlayer(player, Entity.RemovalReason.DISCARDED);
         server.getPlayerManager().remove(player);
 
         server.getPlayerManager().broadcast(
